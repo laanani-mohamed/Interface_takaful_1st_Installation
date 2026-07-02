@@ -6,11 +6,11 @@ from io import StringIO
 from datetime import datetime
 
 
-SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))          # .../Scripts/
-BASE_FOLDER  = os.path.dirname(SCRIPT_DIR)                         # .../Interface_takaful-main/
-SOURCE_FOLDER      = os.path.join(BASE_FOLDER, "Brut")             # .../Brut/
-DESTINATION_FOLDER = os.path.join(BASE_FOLDER, "Ready")            # .../Ready/
-ERROR_FILE         = os.path.join(SOURCE_FOLDER, "error.txt")      # .../Brut/error.txt
+SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))                   # .../Scripts/
+BASE_FOLDER  = os.path.dirname(os.path.dirname(SCRIPT_DIR))                 # .../Interface_takaful-main/
+SOURCE_FOLDER      = os.path.join(BASE_FOLDER, "Brut")                      # .../Brut/
+DESTINATION_FOLDER = os.path.join(BASE_FOLDER, "Ready")                     # .../Ready/
+ERROR_FILE         = os.path.join(SOURCE_FOLDER, "error.txt")               # .../Brut/error.txt
 MAPPING_FILE       = os.path.join(SCRIPT_DIR, "MatriceArrondiTakaful.csv")  # .../Scripts/MatriceArrondiTakaful.csv
 
 
