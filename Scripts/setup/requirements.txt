@@ -1,0 +1,2 @@
+polars==0.20.0
+myutils==0.1.0
