@@ -267,8 +267,11 @@ def process_files():
             if is_enc_file:
                 all_rules.extend(PAYCLIENT_RULES)
                 
+            # Pour conserver l'ordre initial des quittances (row-by-row) :
+            df = df.with_row_index("_row_idx")
+                
             # Boucle d'unpivot (Melt manuel)
-            for src_col, hdr_type, gar, cpt, crit_pat in all_rules:
+            for i, (src_col, hdr_type, gar, cpt, crit_pat) in enumerate(all_rules):
                 if src_col not in df.columns:
                     continue
                     
@@ -308,7 +311,9 @@ def process_files():
                     pl.lit(gar).alias("Garantie"),
                     pl.lit(cpt).alias("CompteTakaful"),
                     build_critere_expr(crit_pat).alias("CritereCompte"),
-                    pl.col(src_col).alias("Montant")
+                    pl.col(src_col).alias("Montant"),
+                    pl.col("_row_idx"),
+                    pl.lit(i).alias("_rule_idx")
                 ])
                 output_dfs.append(sel)
                 
@@ -318,9 +323,10 @@ def process_files():
                 if bank_df.height > 0:
                     bank_summary = bank_df.with_columns(
                         pl.col("MT prime_TTC").str.replace(",", ".").cast(pl.Float64, strict=False)
-                    ).group_by(["code", "Date Reglement"]).agg(
-                        pl.col("MT prime_TTC").sum().round(2).alias("Somme")
-                    )
+                    ).group_by(["code", "Date Reglement"]).agg([
+                        pl.col("MT prime_TTC").sum().round(2).alias("Somme"),
+                        pl.col("_row_idx").first().alias("_row_idx")
+                    ])
                     
                     bank_sel = bank_summary.with_columns([
                         parse_dmy("Date Reglement").dt.strftime("%d%m%Y").fill_null("").alias("TrxDate"),
@@ -337,7 +343,9 @@ def process_files():
                         pl.lit("BF001").alias("Agent"), pl.lit("").alias("Produit"), pl.lit("").alias("Support"),
                         pl.lit("").alias("ChampLettrage"), pl.lit("").alias("Garantie"), pl.lit("CG02").alias("CompteTakaful"),
                         (pl.col("code") + "TTLBANQUE").alias("CritereCompte"),
-                        pl.col("Somme").cast(pl.Utf8).alias("Montant")
+                        pl.col("Somme").cast(pl.Utf8).alias("Montant"),
+                        pl.col("_row_idx"),
+                        pl.lit(len(all_rules)).alias("_rule_idx")
                     ])
                     output_dfs.append(bank_sel)
 
@@ -346,6 +354,11 @@ def process_files():
                 
             # Concaténation de toutes les écritures générées (Equivalent du fichier .RND)
             rnd_df = pl.concat(output_dfs, how="vertical")
+
+            # Tri par index source puis index règle → ordre row-by-row identique au PS1 :
+            # toutes les lignes de la quittance N d'abord, puis celles de la quittance N+1, etc.
+            rnd_df = rnd_df.sort(["_row_idx", "_rule_idx"])
+            rnd_df = rnd_df.drop(["_row_idx", "_rule_idx"])
             
             # Phase 2: Traitement des écarts d'arrondi
             rnd_df = rnd_df.join(mapping_df.select(["CritereCompte", "Data"]), on="CritereCompte", how="left")
@@ -355,7 +368,7 @@ def process_files():
                 pl.col("Montant").cast(pl.Utf8).str.replace(",", ".").cast(pl.Float64, strict=False).round(2).alias("montant_num"),
                 pl.col("Data").cast(pl.Utf8).str.replace(",", ".").cast(pl.Float64, strict=False).round(2).alias("data_num")
             ]).with_columns(
-                (pl.col("montant_num") * pl.col("data_num")).alias("Solde")
+                (pl.col("montant_num") * pl.col("data_num")).round(2).alias("Solde")
             )
             
             # Construction des clés de lettrage Group1 / Group2
@@ -378,6 +391,20 @@ def process_files():
             ])
             
             rnd_df = rnd_df.join(diff_df, on=["Group1", "Group2"], how="left")
+            
+            # --- ÉMULER PS1 Group-Object Group1, Group2 ---
+            # 1. Trouver l'ordre de première apparition de chaque groupe
+            group_order = (
+                rnd_df.select(["Group1", "Group2"])
+                .unique(maintain_order=True)
+                .with_row_index("group_id")
+            )
+            # 2. Joindre cet ID et assigner une position interne
+            rnd_df = rnd_df.join(group_order, on=["Group1", "Group2"], how="left")
+            rnd_df = rnd_df.with_row_index("_internal_pos")
+            # 3. Trier par groupe puis position interne (identique à PS1 export du Group-Object)
+            rnd_df = rnd_df.sort(["group_id", "_internal_pos"])
+            
             diff_blocks = rnd_df.filter(pl.col("Difference").abs() > 0.0)
             
             if diff_blocks.height > 0:
@@ -401,10 +428,40 @@ def process_files():
                       .then(pl.col("CritereCompte").str.slice(0, 2) + "-GRANDECARTP")
                       .otherwise(pl.col("CritereCompte")).alias("CritereCompte")
                 ]).select(rnd_df.columns)
-                
-                final_df = pl.concat([rnd_df, balancing_rows], how="vertical")
+                rnd_df = rnd_df.with_row_index("_pos")
+
+                # Position de la dernière ligne de chaque groupe déséquilibré
+                group_end_pos = (
+                    rnd_df
+                    .filter(pl.col("Difference").abs() > 0.0)
+                    .group_by("group_id")
+                    .agg(pl.col("_pos").max().alias("_group_end_pos"))
+                )
+
+                # Lignes données : _sort_pos = leur position entière
+                rnd_df = rnd_df.with_columns(
+                    pl.col("_pos").cast(pl.Float64).alias("_sort_pos")
+                )
+
+                # Lignes d'écart : _sort_pos = max_pos_groupe + 0.5 (s'insèrent juste après)
+                balancing_rows = (
+                    balancing_rows
+                    .join(group_order, on=["Group1", "Group2"], how="left")
+                    .join(group_end_pos, on="group_id", how="left")
+                    .with_columns(
+                        (pl.col("_group_end_pos").cast(pl.Float64) + 0.5).alias("_sort_pos")
+                    )
+                    .drop(["_group_end_pos", "group_id"])
+                )
+
+                # Concat puis tri par position flottante → ordre PS1-compatible
+                final_df = (
+                    pl.concat([rnd_df.drop(["_pos", "group_id", "_internal_pos"]), balancing_rows], how="diagonal")
+                    .sort("_sort_pos")
+                    .drop(["_sort_pos"])
+                )
             else:
-                final_df = rnd_df
+                final_df = rnd_df.drop(["group_id", "_internal_pos"])
                 
             columns_to_export = [
                 "CodeIFC", "NoPolice", "NoAdhesion", "NomAssure", "NomContractant", "DateEffet", 
