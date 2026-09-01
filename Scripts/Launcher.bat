@@ -36,24 +36,26 @@ echo import site > "!BASEDIR!\python_portable\sitecustomize.py"
 ::     On se place dans le dossier Scripts (pushd)
 ::     et on passe le chemin relatif ./fichier.whl
 set "WHEEL_FOUND=0"
-pushd "!BASEDIR!"
-for %%F in (*.whl) do (
-    set "WHEEL_FOUND=1"
-    echo Installation : %%F
-    "!PYTHON!" -m pip install --no-index "./%%F"
+if exist "!BASEDIR!\setup\" (
+    pushd "!BASEDIR!\setup"
+    for %%F in (*.whl) do (
+        set "WHEEL_FOUND=1"
+        echo Installation : %%F
+        "!PYTHON!" -m pip install --no-index "./%%F"
+    )
+    popd
 )
-popd
 
 if "!WHEEL_FOUND!"=="0" (
-    echo Aucun fichier .whl trouve - verifiez le dossier Scripts.
+    echo Aucun fichier .whl trouve - verifiez le dossier Scripts\setup.
 )
 
 :: 5 - Installer depuis requirements.txt
-if exist "!BASEDIR!\requirements.txt" (
+if exist "!BASEDIR!\setup\requirements.txt" (
     echo Installation depuis requirements.txt ...
-    "!PYTHON!" -m pip install --no-index --find-links="!BASEDIR!" -r "!BASEDIR!\requirements.txt"
+    "!PYTHON!" -m pip install --no-index --find-links="!BASEDIR!\setup" -r "!BASEDIR!\setup\requirements.txt"
 ) else (
-    echo requirements.txt absent - etape ignoree.
+    echo requirements.txt absent dans Scripts\setup - etape ignoree.
 )
 
 :: 6 - Lancer le script principal
@@ -61,6 +63,6 @@ echo.
 echo ==============================
 echo  Lancement de Interface_Takaful.py
 echo ==============================
-"!PYTHON!" "!BASEDIR!\Interface_Takaful.py"
+"!PYTHON!" -u "!BASEDIR!\Interface_Takaful.py"
 pause
 endlocal

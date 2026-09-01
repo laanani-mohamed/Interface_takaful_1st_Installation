@@ -4,6 +4,7 @@ import glob
 import re
 from io import StringIO
 from datetime import datetime
+import traceback
 
 
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))                   # .../Scripts/
@@ -115,10 +116,14 @@ PAYCLIENT_RULES = [
 
 # UTILITAIRES
 
-def log_error(msg):
+def log_error(msg, exc_info=None):
     print(msg)
+    if exc_info:
+        msg_to_write = f"{msg}\n[Détails techniques] : {exc_info}"
+    else:
+        msg_to_write = msg
     with open(ERROR_FILE, 'a', encoding='utf-8') as f:
-        f.write(f"{datetime.now()} : {msg}\n")
+        f.write(f"{datetime.now()} : {msg_to_write}\n")
 
 def parse_dmy(col_name):
     return pl.col(col_name).str.strptime(pl.Date, "%d/%m/%Y", strict=False)
@@ -151,15 +156,15 @@ def process_files():
     try:
         mapping_df = pl.read_csv(MAPPING_FILE, separator=";", infer_schema_length=0).rename({"ID": "CritereCompte"})
     except Exception as e:
-        log_error(f"Erreur chargement matrice d'arrondi : {str(e)}")
+        log_error(f"Erreur chargement matrice d'arrondi : {str(e)}", exc_info=traceback.format_exc())
         return
 
-    search_pattern = os.path.join(SOURCE_FOLDER, "*.*")
+    search_pattern = os.path.join(SOURCE_FOLDER, "*.csv")
     for file_path in glob.glob(search_pattern):
-        if os.path.isdir(file_path) or file_path == MAPPING_FILE:
+        if os.path.isdir(file_path) or file_path in [MAPPING_FILE, ERROR_FILE]:
             continue
             
-        print(f"Préparation du fichier : {file_path} : Phase 1.")
+        print(f"Préparation du fichier : {os.path.relpath(file_path, BASE_FOLDER)} : Phase 1.")
         try:
             # 1. Nettoyage syntaxique du texte (réplique exacte des Regex PS1)
             with open(file_path, 'r', encoding='latin-1', errors='ignore') as f:
@@ -171,7 +176,7 @@ def process_files():
             content = content.replace(',', ';').replace('null;', ';').replace('NULL;', ';')
             
             # 2. Lecture Polars avec tout forcé en String pour éviter les pertes de zéros
-            df = pl.read_csv(StringIO(content), separator=";", infer_schema_length=0)
+            df = pl.read_csv(StringIO(content), separator=";", infer_schema_length=0, truncate_ragged_lines=True)
             
             if df.height == 0:
                 continue
@@ -192,7 +197,7 @@ def process_files():
             if df.height == 0:
                 continue
                 
-            print(f"Préparation du fichier : {file_path} : Phase 2.")
+            print(f"Préparation du fichier : {os.path.relpath(file_path, BASE_FOLDER)} : Phase 2.")
             
             # Sécurisation des colonnes requises
             base_cols = [
@@ -217,10 +222,10 @@ def process_files():
                 pl.col("Code d'actes de Gestion").alias("code"),
                 pl.col("Police").cast(pl.Int64, strict=False).cast(pl.Utf8).fill_null("").alias("police_int_str"),
                 pl.col("Quittance").alias("quittance"),
-                pl.col("Nom Assure").str.slice(0, 30).fill_null("").alias("nom_assure"),
-                pl.col("Nom Contractant").str.slice(0, 30).fill_null("").alias("nom_contractant"),
+                pl.col("Nom Assure").str.head(30).fill_null("").alias("nom_assure"),
+                pl.col("Nom Contractant").str.head(30).fill_null("").alias("nom_contractant"),
                 pl.col("Code d'actes de Gestion").str.slice(3).alias("code3"),
-                pl.col("Code d'actes de Gestion").str.slice(0, 3).alias("code03"),
+                pl.col("Code d'actes de Gestion").str.head(3).alias("code03"),
             ])
             
             df = df.with_columns([
@@ -267,15 +272,12 @@ def process_files():
             if is_enc_file:
                 all_rules.extend(PAYCLIENT_RULES)
                 
-            # Pour conserver l'ordre initial des quittances (row-by-row) :
-            df = df.with_row_index("_row_idx")
-                
             # Boucle d'unpivot (Melt manuel)
-            for i, (src_col, hdr_type, gar, cpt, crit_pat) in enumerate(all_rules):
+            for src_col, hdr_type, gar, cpt, crit_pat in all_rules:
                 if src_col not in df.columns:
                     continue
                     
-                rule_df = df.filter((pl.col(src_col).is_not_null()) & (pl.col(src_col) != "0.0") & (pl.col(src_col) != "0"))
+                rule_df = df.filter((pl.col(src_col).is_not_null()) & (pl.col(src_col) != "0.0"))
                 if rule_df.height == 0:
                     continue
 
@@ -311,9 +313,7 @@ def process_files():
                     pl.lit(gar).alias("Garantie"),
                     pl.lit(cpt).alias("CompteTakaful"),
                     build_critere_expr(crit_pat).alias("CritereCompte"),
-                    pl.col(src_col).alias("Montant"),
-                    pl.col("_row_idx"),
-                    pl.lit(i).alias("_rule_idx")
+                    pl.col(src_col).alias("Montant")
                 ])
                 output_dfs.append(sel)
                 
@@ -323,10 +323,9 @@ def process_files():
                 if bank_df.height > 0:
                     bank_summary = bank_df.with_columns(
                         pl.col("MT prime_TTC").str.replace(",", ".").cast(pl.Float64, strict=False)
-                    ).group_by(["code", "Date Reglement"]).agg([
-                        pl.col("MT prime_TTC").sum().round(2).alias("Somme"),
-                        pl.col("_row_idx").first().alias("_row_idx")
-                    ])
+                    ).group_by(["code", "Date Reglement"]).agg(
+                        pl.col("MT prime_TTC").sum().round(2).alias("Somme")
+                    )
                     
                     bank_sel = bank_summary.with_columns([
                         parse_dmy("Date Reglement").dt.strftime("%d%m%Y").fill_null("").alias("TrxDate"),
@@ -343,9 +342,7 @@ def process_files():
                         pl.lit("BF001").alias("Agent"), pl.lit("").alias("Produit"), pl.lit("").alias("Support"),
                         pl.lit("").alias("ChampLettrage"), pl.lit("").alias("Garantie"), pl.lit("CG02").alias("CompteTakaful"),
                         (pl.col("code") + "TTLBANQUE").alias("CritereCompte"),
-                        pl.col("Somme").cast(pl.Utf8).alias("Montant"),
-                        pl.col("_row_idx"),
-                        pl.lit(len(all_rules)).alias("_rule_idx")
+                        pl.col("Somme").cast(pl.Utf8).alias("Montant")
                     ])
                     output_dfs.append(bank_sel)
 
@@ -354,35 +351,30 @@ def process_files():
                 
             # Concaténation de toutes les écritures générées (Equivalent du fichier .RND)
             rnd_df = pl.concat(output_dfs, how="vertical")
-
-            # Tri par index source puis index règle → ordre row-by-row identique au PS1 :
-            # toutes les lignes de la quittance N d'abord, puis celles de la quittance N+1, etc.
-            rnd_df = rnd_df.sort(["_row_idx", "_rule_idx"])
-            rnd_df = rnd_df.drop(["_row_idx", "_rule_idx"])
             
             # Phase 2: Traitement des écarts d'arrondi
             rnd_df = rnd_df.join(mapping_df.select(["CritereCompte", "Data"]), on="CritereCompte", how="left")
             
             # Calcul du Solde
             rnd_df = rnd_df.with_columns([
-                pl.col("Montant").cast(pl.Utf8).str.replace(",", ".").cast(pl.Float64, strict=False).round(2).alias("montant_num"),
-                pl.col("Data").cast(pl.Utf8).str.replace(",", ".").cast(pl.Float64, strict=False).round(2).alias("data_num")
+                pl.col("Montant").cast(pl.Utf8).str.replace(",", ".").cast(pl.Float64, strict=False).fill_null(0.0).round(2).alias("montant_num"),
+                pl.col("Data").cast(pl.Utf8).str.replace(",", ".").cast(pl.Float64, strict=False).fill_null(0.0).round(2).alias("data_num")
             ]).with_columns(
                 (pl.col("montant_num") * pl.col("data_num")).round(2).alias("Solde")
             )
             
-            # Construction des clés de lettrage Group1 / Group2
+            # Construction des clés de lettrage Group1 / Group2 (Réplique exacte PS1 hardcodée)
             rnd_df = rnd_df.with_columns([
-                pl.when(pl.col("CritereCompte").str.slice(0, 2) == "EQ").then(pl.col("Garantie"))
+                pl.when(pl.col("CritereCompte").str.head(2) == "EQ").then(pl.col("Garantie"))
                   .when(pl.col("CritereCompte").is_in(["ENCADE-PRIME_TTC_CP", "ENCADETTLBANQUE"])).then(pl.lit("ENCADE"))
                   .when(pl.col("CritereCompte").is_in(["ENCMRB-PRIME_TTC_CP", "ENCMRBTTLBANQUE"])).then(pl.lit("ENCMRB"))
-                  .when(pl.col("CritereCompte").str.slice(0, 12) == "ENC-LIB_COMM").then(pl.lit("ENCLIBCOMM"))
+                  .when(pl.col("CritereCompte").str.head(12) == "ENC-LIB_COMM").then(pl.lit("ENCLIBCOMM"))
                   .otherwise(pl.lit("")).alias("Group1"),
                   
-                pl.when(pl.col("CritereCompte").str.slice(0, 2) == "EQ").then(pl.col("NoAdhesion"))
+                pl.when(pl.col("CritereCompte").str.head(2) == "EQ").then(pl.col("NoAdhesion"))
                   .when(pl.col("CritereCompte").is_in(["ENCADE-PRIME_TTC_CP", "ENCADETTLBANQUE"])).then(pl.col("TrxDate"))
                   .when(pl.col("CritereCompte").is_in(["ENCMRB-PRIME_TTC_CP", "ENCMRBTTLBANQUE"])).then(pl.col("TrxDate"))
-                  .when(pl.col("CritereCompte").str.slice(0, 12) == "ENC-LIB_COMM").then(pl.col("TrxDate"))
+                  .when(pl.col("CritereCompte").str.head(12) == "ENC-LIB_COMM").then(pl.col("TrxDate"))
                   .otherwise(pl.lit("")).alias("Group2"),
             ])
             
@@ -391,20 +383,6 @@ def process_files():
             ])
             
             rnd_df = rnd_df.join(diff_df, on=["Group1", "Group2"], how="left")
-            
-            # --- ÉMULER PS1 Group-Object Group1, Group2 ---
-            # 1. Trouver l'ordre de première apparition de chaque groupe
-            group_order = (
-                rnd_df.select(["Group1", "Group2"])
-                .unique(maintain_order=True)
-                .with_row_index("group_id")
-            )
-            # 2. Joindre cet ID et assigner une position interne
-            rnd_df = rnd_df.join(group_order, on=["Group1", "Group2"], how="left")
-            rnd_df = rnd_df.with_row_index("_internal_pos")
-            # 3. Trier par groupe puis position interne (identique à PS1 export du Group-Object)
-            rnd_df = rnd_df.sort(["group_id", "_internal_pos"])
-            
             diff_blocks = rnd_df.filter(pl.col("Difference").abs() > 0.0)
             
             if diff_blocks.height > 0:
@@ -419,49 +397,19 @@ def process_files():
                     (-pl.col("Difference")).alias("Solde"),
                     
                     pl.when((pl.col("Difference") <= SEUIL_POSITIF) & (pl.col("Difference") > 0.0))
-                      .then(pl.col("CritereCompte").str.slice(0, 2) + "-ECARTPOSITIF")
+                      .then(pl.col("CritereCompte").str.head(2) + "-ECARTPOSITIF")
                       .when((pl.col("Difference") >= SEUIL_NEGATIF) & (pl.col("Difference") < 0.0))
-                      .then(pl.col("CritereCompte").str.slice(0, 2) + "-ECARTNEGATIF")
+                      .then(pl.col("CritereCompte").str.head(2) + "-ECARTNEGATIF")
                       .when(pl.col("Difference") < SEUIL_NEGATIF)
-                      .then(pl.col("CritereCompte").str.slice(0, 2) + "-GRANDECARTN")
+                      .then(pl.col("CritereCompte").str.head(2) + "-GRANDECARTN")
                       .when(pl.col("Difference") > SEUIL_POSITIF)
-                      .then(pl.col("CritereCompte").str.slice(0, 2) + "-GRANDECARTP")
+                      .then(pl.col("CritereCompte").str.head(2) + "-GRANDECARTP")
                       .otherwise(pl.col("CritereCompte")).alias("CritereCompte")
                 ]).select(rnd_df.columns)
-                rnd_df = rnd_df.with_row_index("_pos")
-
-                # Position de la dernière ligne de chaque groupe déséquilibré
-                group_end_pos = (
-                    rnd_df
-                    .filter(pl.col("Difference").abs() > 0.0)
-                    .group_by("group_id")
-                    .agg(pl.col("_pos").max().alias("_group_end_pos"))
-                )
-
-                # Lignes données : _sort_pos = leur position entière
-                rnd_df = rnd_df.with_columns(
-                    pl.col("_pos").cast(pl.Float64).alias("_sort_pos")
-                )
-
-                # Lignes d'écart : _sort_pos = max_pos_groupe + 0.5 (s'insèrent juste après)
-                balancing_rows = (
-                    balancing_rows
-                    .join(group_order, on=["Group1", "Group2"], how="left")
-                    .join(group_end_pos, on="group_id", how="left")
-                    .with_columns(
-                        (pl.col("_group_end_pos").cast(pl.Float64) + 0.5).alias("_sort_pos")
-                    )
-                    .drop(["_group_end_pos", "group_id"])
-                )
-
-                # Concat puis tri par position flottante → ordre PS1-compatible
-                final_df = (
-                    pl.concat([rnd_df.drop(["_pos", "group_id", "_internal_pos"]), balancing_rows], how="diagonal")
-                    .sort("_sort_pos")
-                    .drop(["_sort_pos"])
-                )
+                
+                final_df = pl.concat([rnd_df, balancing_rows], how="vertical")
             else:
-                final_df = rnd_df.drop(["group_id", "_internal_pos"])
+                final_df = rnd_df
                 
             columns_to_export = [
                 "CodeIFC", "NoPolice", "NoAdhesion", "NomAssure", "NomContractant", "DateEffet", 
@@ -482,8 +430,6 @@ def process_files():
             final_df = final_df.with_columns([
                 pl.col("Montant").cast(pl.Utf8)
                     .str.replace(",", ".")
-                    .cast(pl.Float64, strict=False)
-                    .map_elements(fmt_num, return_dtype=pl.Utf8)
                     .alias("Montant"),
                 pl.col("Solde")
                     .cast(pl.Float64, strict=False)
@@ -510,10 +456,10 @@ def process_files():
                 with open(out_path, "w", encoding="ascii", errors="ignore", newline="") as f:
                     f.write(csv_content)
 
-            print(f"Fichiers générés : {sun_path} et {csv_path}")
+            print(f"Fichiers générés : {os.path.relpath(sun_path, BASE_FOLDER)} et {os.path.relpath(csv_path, BASE_FOLDER)}")
             
         except Exception as e:
-            log_error(f"Erreur lors du traitement de {file_path} : {str(e)}")
+            log_error(f"Erreur lors du traitement de {file_path} : {str(e)}", exc_info=traceback.format_exc())
 
 if __name__ == '__main__':
     process_files()
