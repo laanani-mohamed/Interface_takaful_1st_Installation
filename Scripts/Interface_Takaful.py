@@ -222,10 +222,10 @@ def process_files():
                 pl.col("Code d'actes de Gestion").alias("code"),
                 pl.col("Police").cast(pl.Int64, strict=False).cast(pl.Utf8).fill_null("").alias("police_int_str"),
                 pl.col("Quittance").alias("quittance"),
-                pl.col("Nom Assure").str.head(30).fill_null("").alias("nom_assure"),
-                pl.col("Nom Contractant").str.head(30).fill_null("").alias("nom_contractant"),
+                pl.col("Nom Assure").str.slice(0, 30).fill_null("").alias("nom_assure"),
+                pl.col("Nom Contractant").str.slice(0, 30).fill_null("").alias("nom_contractant"),
                 pl.col("Code d'actes de Gestion").str.slice(3).alias("code3"),
-                pl.col("Code d'actes de Gestion").str.head(3).alias("code03"),
+                pl.col("Code d'actes de Gestion").str.slice(0, 3).alias("code03"),
             ])
             
             df = df.with_columns([
@@ -365,16 +365,16 @@ def process_files():
             
             # Construction des clés de lettrage Group1 / Group2 (Réplique exacte PS1 hardcodée)
             rnd_df = rnd_df.with_columns([
-                pl.when(pl.col("CritereCompte").str.head(2) == "EQ").then(pl.col("Garantie"))
+                pl.when(pl.col("CritereCompte").str.slice(0, 2) == "EQ").then(pl.col("Garantie"))
                   .when(pl.col("CritereCompte").is_in(["ENCADE-PRIME_TTC_CP", "ENCADETTLBANQUE"])).then(pl.lit("ENCADE"))
                   .when(pl.col("CritereCompte").is_in(["ENCMRB-PRIME_TTC_CP", "ENCMRBTTLBANQUE"])).then(pl.lit("ENCMRB"))
-                  .when(pl.col("CritereCompte").str.head(12) == "ENC-LIB_COMM").then(pl.lit("ENCLIBCOMM"))
+                  .when(pl.col("CritereCompte").str.slice(0, 12) == "ENC-LIB_COMM").then(pl.lit("ENCLIBCOMM"))
                   .otherwise(pl.lit("")).alias("Group1"),
                   
-                pl.when(pl.col("CritereCompte").str.head(2) == "EQ").then(pl.col("NoAdhesion"))
+                pl.when(pl.col("CritereCompte").str.slice(0, 2) == "EQ").then(pl.col("NoAdhesion"))
                   .when(pl.col("CritereCompte").is_in(["ENCADE-PRIME_TTC_CP", "ENCADETTLBANQUE"])).then(pl.col("TrxDate"))
                   .when(pl.col("CritereCompte").is_in(["ENCMRB-PRIME_TTC_CP", "ENCMRBTTLBANQUE"])).then(pl.col("TrxDate"))
-                  .when(pl.col("CritereCompte").str.head(12) == "ENC-LIB_COMM").then(pl.col("TrxDate"))
+                  .when(pl.col("CritereCompte").str.slice(0, 12) == "ENC-LIB_COMM").then(pl.col("TrxDate"))
                   .otherwise(pl.lit("")).alias("Group2"),
             ])
             
@@ -397,13 +397,13 @@ def process_files():
                     (-pl.col("Difference")).alias("Solde"),
                     
                     pl.when((pl.col("Difference") <= SEUIL_POSITIF) & (pl.col("Difference") > 0.0))
-                      .then(pl.col("CritereCompte").str.head(2) + "-ECARTPOSITIF")
+                      .then(pl.col("CritereCompte").str.slice(0, 2) + "-ECARTPOSITIF")
                       .when((pl.col("Difference") >= SEUIL_NEGATIF) & (pl.col("Difference") < 0.0))
-                      .then(pl.col("CritereCompte").str.head(2) + "-ECARTNEGATIF")
+                      .then(pl.col("CritereCompte").str.slice(0, 2) + "-ECARTNEGATIF")
                       .when(pl.col("Difference") < SEUIL_NEGATIF)
-                      .then(pl.col("CritereCompte").str.head(2) + "-GRANDECARTN")
+                      .then(pl.col("CritereCompte").str.slice(0, 2) + "-GRANDECARTN")
                       .when(pl.col("Difference") > SEUIL_POSITIF)
-                      .then(pl.col("CritereCompte").str.head(2) + "-GRANDECARTP")
+                      .then(pl.col("CritereCompte").str.slice(0, 2) + "-GRANDECARTP")
                       .otherwise(pl.col("CritereCompte")).alias("CritereCompte")
                 ]).select(rnd_df.columns)
                 
